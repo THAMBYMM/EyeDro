@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Anti-Drowsiness Eye Monitor</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --text: #f8fafc;
+      --accent: #3b82f6;
+      --danger: #ef4444;
+      --success: #22c55e;
+    }
+    body {
+      margin: 0;
+      padding: 1rem;
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+      box-sizing: border-box;
+    }
+    h2 {
+      margin: 0 0 1rem 0;
+      font-size: 1.25rem;
+      text-align: center;
+    }
+    .container {
+      position: relative;
+      width: 100%;
+      max-width: 480px;
+      border-radius: 12px;
+      overflow: hidden;
+      background: var(--card);
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+    }
+    video {
+      width: 100%;
+      height: auto;
+      display: block;
+      transform: scaleX(-1); /* Mirror view */
+    }
+    .status-card {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      right: 12px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(8px);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 600;
+      font-size: 0.9rem;
+    }
+    .status-indicator {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--danger);
+      margin-right: 6px;
+    }
+    .status-indicator.active {
+      background: var(--success);
+    }
+    .controls {
+      margin-top: 1rem;
+      width: 100%;
+      max-width: 480px;
+      display: flex;
+      gap: 10px;
+    }
+    button {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .alert-box {
+      margin-top: 1rem;
+      width: 100%;
+      max-width: 480px;
+      padding: 12px;
+      border-radius: 8px;
+      background: rgba(239, 68, 68, 0.2);
+      border: 1px solid var(--danger);
+      color: #fca5a5;
+      text-align: center;
+      font-weight: bold;
+      display: none;
+    }
+  </style>
+
+  <!-- MediaPipe Face Mesh Dependencies -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+  <h2>Anti-Drowsiness Alarm System</h2>
+
+  <div class="container">
+    <video id="webcam" autoplay playsinline></video>
+    <div class="status-card">
+      <div>
+        <span id="indicator" class="status-indicator"></span>
+        <span id="status-text">Camera Off</span>
+      </div>
+      <div>Closed: <span id="closed-time">0.0</span>s</div>
+    </div>
+  </div>
+
+  <div id="alert" class="alert-box">⚠️ WAKE UP! EYES CLOSED TOO LONG!</div>
+
+  <div class="controls">
+    <button id="start-btn">Start Monitoring</button>
+    <button id="stop-btn" disabled>Stop</button>
+  </div>
+
+  <script>
+    const videoElement = document.getElementById('webcam');
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const statusText = document.getElementById('status-text');
+    const indicator = document.getElementById('indicator');
+    const closedTimeEl = document.getElementById('closed-time');
+    const alertBox = document.getElementById('alert');
+
+    let camera = null;
+    let eyesClosedStartTime = null;
+    let alarmInterval = null;
+    let audioCtx = null;
+    let oscillator = null;
+
+    // MediaPipe Face Mesh Landmark Indices for Eyes
+    const LEFT_EYE = [33, 160, 158, 133, 153, 144];
+    const RIGHT_EYE = [362, 385, 387, 263, 373, 380];
+
+    // Distance calculation
+    function distance(p1, p2) {
+      return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    }
+
+    // Eye Aspect Ratio (EAR)
+    function calculateEAR(landmarks, eyeIndices) {
+      const p1 = landmarks[eyeIndices[0]];
+      const p2 = landmarks[eyeIndices[1]];
+      const p3 = landmarks[eyeIndices[2]];
+      const p4 = landmarks[eyeIndices[3]];
+      const p5 = landmarks[eyeIndices[4]];
+      const p6 = landmarks[eyeIndices[5]];
+
+      const vertical1 = distance(p2, p6);
+      const vertical2 = distance(p3, p5);
+      const horizontal = distance(p1, p4);
+
+      return (vertical1 + vertical2) / (2.0 * horizontal);
+    }
+
+    // Web Audio Sound Generator for Alarm Siren
+    function startSiren() {
+      if (audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      oscillator = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+
+      oscillator.type = 'sawtooth';
+      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // A5 note
+
+      // Modulate pitch for siren effect
+      let high = true;
+      alarmInterval = setInterval(() => {
+        if (oscillator) {
+          oscillator.frequency.setValueAtTime(high ? 880 : 440, audioCtx.currentTime);
+          high = !high;
+        }
+      }, 200);
+
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+      oscillator.start();
+    }
+
+    function stopSiren() {
+      if (oscillator) {
+        oscillator.stop();
+        oscillator.disconnect();
+        oscillator = null;
+      }
+      if (audioCtx) {
+        audioCtx.close();
+        audioCtx = null;
+      }
+      if (alarmInterval) {
+        clearInterval(alarmInterval);
+        alarmInterval = null;
+      }
+    }
+
+    function onResults(results) {
+      if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+        statusText.innerText = "No Face Detected";
+        indicator.classList.remove('active');
+        resetTimer();
+        return;
+      }
+
+      statusText.innerText = "Monitoring Active";
+      indicator.classList.add('active');
+
+      const landmarks = results.multiFaceLandmarks[0];
+      const leftEAR = calculateEAR(landmarks, LEFT_EYE);
+      const rightEAR = calculateEAR(landmarks, RIGHT_EYE);
+      const avgEAR = (leftEAR + rightEAR) / 2;
+
+      // Threshold for closed eyes (typically around < 0.21)
+      const EAR_THRESHOLD = 0.20;
+
+      if (avgEAR < EAR_THRESHOLD) {
+        if (!eyesClosedStartTime) {
+          eyesClosedStartTime = performance.now();
+        }
+
+        const duration = (performance.now() - eyesClosedStartTime) / 1000;
+        closedTimeEl.innerText = duration.toFixed(1);
+
+        if (duration >= 2.0) {
+          alertBox.style.display = 'block';
+          startSiren();
+        }
+      } else {
+        resetTimer();
+      }
+    }
+
+    function resetTimer() {
+      eyesClosedStartTime = null;
+      closedTimeEl.innerText = "0.0";
+      alertBox.style.display = 'none';
+      stopSiren();
+    }
+
+    const faceMesh = new FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+
+    faceMesh.setOptions({
+      maxNumFaces: 1,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    faceMesh.onResults(onResults);
+
+    startBtn.addEventListener('click', () => {
+      camera = new Camera(videoElement, {
+        onFrame: async () => {
+          await faceMesh.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480,
+        facingMode: 'user' // Front camera
+      });
+
+      camera.start();
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      statusText.innerText = "Initializing...";
+    });
+
+    stopBtn.addEventListener('click', () => {
+      if (camera) {
+        camera.stop();
+      }
+      resetTimer();
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      statusText.innerText = "Camera Off";
+      indicator.classList.remove('active');
+    });
+  </script>
+</body>
+</html>
